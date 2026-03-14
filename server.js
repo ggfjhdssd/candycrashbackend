@@ -5,6 +5,7 @@ const http = require('http');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 const https = require('https');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
@@ -18,6 +19,20 @@ app.use((req, res, next) => {
   next();
 });
 app.use(express.json());
+
+// ─── Static audio with correct MIME types (fallback if frontend can't serve) ───
+const path = require('path');
+express.static.mime.define({
+  'audio/ogg':  ['ogg','ogx','oga'],
+  'audio/mpeg': ['mp3'],
+  'audio/wav':  ['wav'],
+});
+app.use('/audio', (req, res, next) => {
+  const ext = req.path.split('.').pop().toLowerCase();
+  const mimeMap = { ogg:'audio/ogg', ogx:'audio/ogg', mp3:'audio/mpeg', wav:'audio/wav' };
+  if (mimeMap[ext]) res.type(mimeMap[ext]);
+  next();
+}, express.static(path.join(__dirname, 'audio')));
 
 const io = new Server(server, {
   cors: { origin: '*', methods: ['GET','POST'] },
