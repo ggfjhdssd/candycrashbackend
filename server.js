@@ -47,7 +47,8 @@ const BOT_USERNAME = process.env.BOT_USERNAME || 'candycrush_bot';
 const ENTRY_FEE = 500;
 const WIN_PRIZE = 800;
 const DRAW_REFUND = 250;
-const GAME_DURATION_S = 180;   // ★ 3 minutes candy crush timer
+const GAME_DURATION_S = 180;   // 3 minutes
+const WIN_SCORE       = 700;   // instant win threshold
 const SEARCH_TIMEOUT_S = 60;
 
 // ===== MongoDB =====
@@ -212,7 +213,8 @@ const Agent = mongoose.model('Agent', agentSchema);
 // ===== In-Memory =====
 const waitingQueue = [];
 const activeGames = new Map();
-const gameTurnTimeouts = new Map();   // reused for game end timers
+const gameTurnTimeouts = new Map();
+const gameTimerIntervals = new Map();  // server-side tick intervals per game   // reused for game end timers
 const userSockets = new Map();
 const searchNotifications = new Map();
 const searchTimeouts = new Map();
@@ -705,6 +707,9 @@ async function endGame(gameId, winner, reason='timeup') {
 
   activeGames.delete(gameId);
   clearTurnTimer(gameId);
+  // Clear server-side tick interval
+  const giv = gameTimerIntervals.get(gameId);
+  if (giv) { clearInterval(giv); gameTimerIntervals.delete(gameId); }
   for (const pid of (game.players || [])) {
     const t = searchTimeouts.get(pid);
     if (t) { clearTimeout(t); searchTimeouts.delete(pid); }
@@ -740,15 +745,18 @@ io.on('connection', (socket) => {
         myGameId = gid;
         socket.join(gid);
         const oppId = game.players.find(p => p !== myUserId);
+        const elapsed = Date.now() - (game.startedAt || Date.now());
+        const tLeft = Math.max(0, GAME_DURATION_S - Math.floor(elapsed/1000));
         socket.emit('gameResumed',{
           gameId: gid,
           duration: GAME_DURATION_S,
+          timeLeft: tLeft,
           players: game.playerNames,
           myId: myUserId,
           opponentId: oppId,
           myScore: game.scores[myUserId] || 0,
           opponentScore: game.scores[oppId] || 0,
-          elapsedMs: Date.now() - game.startedAt
+          elapsedMs: elapsed
         });
         return;
       }
@@ -854,9 +862,33 @@ io.on('connection', (socket) => {
 
         await deleteSearchMsgs(myGameId);
 
-        // ★ Start 3-minute game timer
-        const t = setTimeout(() => endGameByTime(myGameId), GAME_DURATION_S * 1000 + 2000);
-        gameTurnTimeouts.set(myGameId, t);
+        // ── Server-side game clock ──────────────────────────────────
+        // Tick every second: broadcast timeLeft to both players,
+        // check WIN_SCORE threshold, end game when time reaches 0.
+        let ticksLeft = GAME_DURATION_S;
+        const tickInterval = setInterval(async () => {
+          const g = activeGames.get(myGameId);
+          if (!g || g.status !== 'active') { clearInterval(tickInterval); gameTimerIntervals.delete(myGameId); return; }
+          ticksLeft--;
+          // Broadcast current time to both players in the room
+          io.to(myGameId).emit('timeTick', { timeLeft: ticksLeft });
+          // Instant win: check if either player reached WIN_SCORE
+          const p1s = g.scores[g.players[0]] || 0;
+          const p2s = g.scores[g.players[1]] || 0;
+          if (p1s >= WIN_SCORE || p2s >= WIN_SCORE) {
+            clearInterval(tickInterval); gameTimerIntervals.delete(myGameId);
+            const winner = p1s >= WIN_SCORE ? g.players[0] : g.players[1];
+            await endGame(myGameId, winner, 'score_win');
+            return;
+          }
+          // Time up
+          if (ticksLeft <= 0) {
+            clearInterval(tickInterval); gameTimerIntervals.delete(myGameId);
+            const w = p1s > p2s ? g.players[0] : p2s > p1s ? g.players[1] : -1;
+            await endGame(myGameId, w, 'timeup');
+          }
+        }, 1000);
+        gameTimerIntervals.set(myGameId, tickInterval);
 
       } else {
         const gameId = genGameId();
@@ -907,31 +939,36 @@ io.on('connection', (socket) => {
       game.scores[myUserId] = newScore;
       game.lastMoveAt = Date.now();
 
-      // Broadcast to opponent
-      const opponent = game.players.find(p => p !== myUserId);
-      if (opponent && opponent !== AI_ID) {
-        const oppSockId = userSockets.get(opponent);
-        const oppSock = oppSockId ? io.sockets.sockets.get(oppSockId) : null;
-        if (oppSock) {
-          oppSock.emit('opponentScore', { score: newScore, playerId: myUserId });
+      // ── Broadcast score to ALL players in room instantly ──
+      // Using io.to(room) ensures zero-lag delivery even if opponent
+      // reconnects on a new socket mid-game.
+      io.to(gameId).emit('scoreUpdate', {
+        playerId: myUserId,
+        score:    newScore,
+        scores:   game.scores
+      });
+
+      // ── Instant win check (700 pts) ──
+      if (!game.isAIGame && newScore >= WIN_SCORE) {
+        // Clear the interval timer first so it doesn't fire again
+        const iv = gameTimerIntervals.get(gameId);
+        if (iv) { clearInterval(iv); gameTimerIntervals.delete(gameId); }
+        if (game.status === 'active') {
+          await endGame(gameId, myUserId, 'score_win');
         }
       }
     } catch(e) { console.error('scoreUpdate err:', e); }
   });
 
-  // ★ End game by time (server-side timer fires)
+  // endGameByTime kept for AI games / zombie cleanup compatibility
   async function endGameByTime(gameId) {
+    const iv = gameTimerIntervals.get(gameId);
+    if (iv) { clearInterval(iv); gameTimerIntervals.delete(gameId); }
     const game = activeGames.get(gameId);
     if (!game || game.status !== 'active') return;
-
     const [p1, p2] = game.players;
-    const s1 = game.scores[p1] || 0;
-    const s2 = game.scores[p2] || 0;
-    let winner;
-    if (s1 > s2) winner = p1;
-    else if (s2 > s1) winner = p2;
-    else winner = -1;
-
+    const s1 = game.scores[p1] || 0, s2 = game.scores[p2] || 0;
+    const winner = s1 > s2 ? p1 : s2 > s1 ? p2 : -1;
     await endGame(gameId, winner, 'timeup');
   }
 
