@@ -28,8 +28,8 @@ const io = new Server(server, {
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = process.env.ADMIN_ID ? parseInt(process.env.ADMIN_ID) : null;
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://candycrushfrontend.vercel.app';
-const BACKEND_URL = process.env.BACKEND_URL || 'https://candycrushbackend.onrender.com';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://candycrashfrontend.vercel.app';
+const BACKEND_URL = process.env.BACKEND_URL || 'https://candycrashbackend.onrender.com';
 const BOT_USERNAME = process.env.BOT_USERNAME || 'candycrush_bot';
 const ENTRY_FEE = 500;
 const WIN_PRIZE = 800;
