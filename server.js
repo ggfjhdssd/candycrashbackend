@@ -20,17 +20,16 @@ app.use((req, res, next) => {
 });
 app.use(express.json());
 
-// ─── Static audio with correct MIME types (fallback if frontend can't serve) ───
+// ─── Static audio with correct MIME types ───
 const path = require('path');
-express.static.mime.define({
-  'audio/ogg':  ['ogg','ogx','oga'],
-  'audio/mpeg': ['mp3'],
-  'audio/wav':  ['wav'],
-});
 app.use('/audio', (req, res, next) => {
   const ext = req.path.split('.').pop().toLowerCase();
-  const mimeMap = { ogg:'audio/ogg', ogx:'audio/ogg', mp3:'audio/mpeg', wav:'audio/wav' };
-  if (mimeMap[ext]) res.type(mimeMap[ext]);
+  const mimeMap = { mp3:'audio/mpeg', wav:'audio/wav', ogg:'audio/ogg' };
+  if (mimeMap[ext]) {
+    res.setHeader('Content-Type', mimeMap[ext]);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+  }
   next();
 }, express.static(path.join(__dirname, 'audio')));
 
