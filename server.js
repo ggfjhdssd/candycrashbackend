@@ -1282,6 +1282,48 @@ app.post('/api/admin/withdrawals/:id/confirm', isAdmin, async(req,res)=>{
     if (!wd) return res.status(400).json({error:'Withdrawal မတွေ့ပါ သို့မဟုတ် ပြင်ဆင်ပြီးသားဖြစ်သည်'});
     if (bot) bot.telegram.sendMessage(wd.userId,`✅ ငွေ ${wd.amount.toLocaleString()} ကျပ် ထုတ်မှု အတည်ပြုပြီး!\n${wd.paymentMethod==='wave'?'🌊 Wave Pay':'📱 KPay'}: ${wd.kpayNumber} 🎉`).catch(()=>{});
     res.json({success:true});
+
+    // ── Broadcast withdrawal success notification to all other users ──
+    if (bot) {
+      (async () => {
+        try {
+          // 1) ငွေထုတ်သူ၏ info ကို DB မှ ယူသည်
+          const wdUser = await User.findOne({ telegramId: wd.userId }).select('telegramId username firstName').lean();
+
+          // 2) Clickable mention ဖန်တီးသည်
+          const mentionName = wdUser?.username
+            ? `@${wdUser.username}`
+            : `[${wdUser?.firstName || 'ကစားသမား'}](tg://user?id=${wd.userId})`;
+
+          // 3) Notification စာသား
+          const broadcastText =
+            `🎉 ဂုဏ်ယူပါတယ်\\! > ငွေထုတ်ယူမှု အောင်မြင်ပါသည်။\n\n` +
+            `ကစားသမား ${mentionName} သည် CandyCrash ဂိမ်းမှ *${wd.amount.toLocaleString()}* MMK ကို အောင်မြင်စွာ ထုတ်ယူသွားပါပြီ\\! 💸\n\n` +
+            `🎮 မိတ်ဆွေလည်း အခုပဲ ဝင်ရောက်ကစားပြီး အမြတ်တွေ ထုတ်ယူလိုက်ပါ\\!`;
+
+          // 4) ငွေထုတ်သူမပါဘဲ users အားလုံး ယူသည်
+          const allOtherUsers = await User.find({ telegramId: { $ne: wd.userId }, isBanned: { $ne: true } })
+            .select('telegramId lastActive').lean();
+
+          // 5) Online (socket ချိတ်ဆက်နေသူ) ကို ဦးစားပေး၍ sort လုပ်သည်
+          const onlineUsers  = allOtherUsers.filter(u => userSockets.has(u.telegramId));
+          const offlineUsers = allOtherUsers.filter(u => !userSockets.has(u.telegramId))
+            .sort((a, b) => (b.lastActive || 0) - (a.lastActive || 0));
+          const sortedUsers  = [...onlineUsers, ...offlineUsers];
+
+          // 6) Anti-spam queue — မက်ဆေ့ချ်တစ်ခုနဲ့တစ်ခုကြား 100~200ms delay
+          for (const u of sortedUsers) {
+            await bot.telegram.sendMessage(u.telegramId, broadcastText, { parse_mode: 'MarkdownV2' }).catch(() => {});
+            const delay = 100 + Math.floor(Math.random() * 101); // 100–200ms
+            await new Promise(resolve => setTimeout(resolve, delay));
+          }
+        } catch (broadcastErr) {
+          console.error('Withdrawal broadcast error:', broadcastErr.message);
+        }
+      })();
+    }
+    // ── End broadcast ──
+
   } catch(e){ res.status(500).json({error:e.message}); }
 });
 
